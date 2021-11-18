@@ -15,7 +15,7 @@ def gnmi_scan(ip_range,port=GNMI_PORT):
     except socket.gaierror:
         raise ValueError('Hostname {} could not be resolved.'.format(ip))
 
-    ans, unans = sr(syn, inter=0.1, timeout=0.1, retry=0)
+    ans, unans = sr(syn, inter=0.01, timeout=0.01, retry=0)
     result = []
 
     for sent, received in ans:
@@ -25,57 +25,71 @@ def gnmi_scan(ip_range,port=GNMI_PORT):
     return result
 
 # gnmic -a 172.20.20.2 -u admin -p admin -e json_ietf --skip-verify get --path /system/lldp
-def ListLLDPNeighbors(node):
+def GetConfigAndListLLDPNeighbors(node):
     """
-    Uses a gNMI connection to list LLDP neighbors for the given node
-
-    Note the hardcoded admin/admin credentials
-    """
-    from pygnmi.client import gNMIclient
-
-    with gNMIclient(target=(node,GNMI_PORT),
-                    username="admin",password="admin",
-                    insecure=False, debug=False) as c:
-        path = "/system/lldp" # /interface/neighbor
-        data = c.get(path=[path],encoding='json_ietf')
-        print( data )
-        res = data['notification'][0]['update'][0]['val']
-
-        def shorten(i):
-            return i.replace("ethernet-","e").replace('/','-')
-
-        release = re.match( "^SRLinux-v(\d+[.]\d+[.]\d+).*$", res['system-description'] )
-        ver = release.groups()[0] if release else 'latest'
-        return [ (res['system-name'], ver, shorten(intf['name']), n['system-name'], shorten(n['port-id']))
-                 for intf in res['interface']
-                 for n in [ intf['neighbor'][0] ] ]
-
-def GetConfig(node):
-    """
-    Uses a gNMI connection to get the full system config for the given node
+    Uses a gNMI connection to get config and list LLDP neighbors for the given node
 
     Note the hardcoded admin/admin credentials
     """
     from pygnmi.client import gNMIclient
     import json
 
-    with gNMIclient(target=(node,GNMI_PORT),
-                    username="admin",password="admin",
-                    insecure=False, debug=False) as c:
-        data = c.get(path=['/'],datatype='config',encoding='json_ietf')
-        res = data['notification'][0]['update'][0]['val']
+    try:
+      c = gNMIclient(target=(node,GNMI_PORT),
+                     username="admin",password="admin",
+                     insecure=False, debug=False)
+      c.connect()
+    except Exception as ex:
+      c = gNMIclient(target=(node,GNMI_PORT),
+                     username="admin",password="admin",
+                     insecure=True, debug=False)
+      c.connect()
 
-        # Remove agent configs
-        for ns in list(res):
-           if not ns.startswith( "srl_nokia" ):
-             print( f"Removing: {ns}" )
-             del res[ns]
+    # 1. Get config and write as file
+    data = c.get(path=['/'],datatype='config',encoding='json_ietf')
+    res = data['notification'][0]['update'][0]['val']
 
-        with open( node+".json", "w") as configfile:
-            configfile.write( json.dumps(res) )
+    isSRL = 'srl_nokia-system:system' in res
+
+    # Remove agent configs for SRL
+    if isSRL:
+     for ns in list(res):
+       if not ns.startswith( "srl_nokia" ):
+         print( f"Removing: {ns}" )
+         del res[ns]
+    with open( node+".json", "w") as configfile:
+        configfile.write( json.dumps(res) )
+
+    # 2. For SRLinux, get LLDP state from native model; for SROS use openconfig
+    path = '/system/lldp' if isSRL else '/lldp'
+    try:
+      data = c.get(path=[path],encoding='json_ietf')
+      print( data )
+      res = data['notification'][0]['update'][0]['val']
+      print( res )
+
+      if isSRL:
+        def shorten(i):
+          return i.replace("ethernet-","e").replace('/','-')
+        release = re.match( "^SRLinux-v(\d+[.]\d+[.]\d+).*$", res['system-description'] )
+        ver = release.groups()[0] if release else 'latest'
+        return [ (res['system-name'], ver, shorten(intf['name']), n['system-name'], shorten(n['port-id']))
+               for intf in res['interface']
+               for n in [ intf['neighbor'][0] ] ]
+    except Exception as ex:
+        # In case openconfig is not supported
+        print(ex)
+    finally:
+      c.close()
+
+    return []
 
 def CreateTopology(neighbors):
+    """
+    Writes a Containerlab topology file based on discovered nodes
+    """
     from jinja2 import Template
+
     nodes = set( [ (node,lldp[0][0],lldp[0][1]) for node,lldp in neighbors.items() ] )
     TOPOLOGY = """name: Auto-discovered-sandbox
 topology:
@@ -102,13 +116,12 @@ topology:
     Template(TOPOLOGY).stream(nodes=nodes,neighbors=neighbors).dump('sandbox.yml')
 
 if __name__ == "__main__":
-    nodes = gnmi_scan(ip_range="172.20.20.1/30")
+    nodes = gnmi_scan(ip_range="172.20.20.1/28")
     print( nodes )
 
     neighbors = {}
     for n in nodes:
-        neighbors[n] = ListLLDPNeighbors(n)
-        GetConfig(n)
+        neighbors[n] = GetConfigAndListLLDPNeighbors(n)
     print( neighbors )
 
     CreateTopology(neighbors)
