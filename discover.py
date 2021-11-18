@@ -50,20 +50,44 @@ def ListLLDPNeighbors(node):
                  for intf in res['interface']
                  for n in [ intf['neighbor'][0] ] ]
 
+def GetConfig(node):
+    """
+    Uses a gNMI connection to get the full system config for the given node
+
+    Note the hardcoded admin/admin credentials
+    """
+    from pygnmi.client import gNMIclient
+    import json
+
+    with gNMIclient(target=(node,GNMI_PORT),
+                    username="admin",password="admin",
+                    insecure=False, debug=False) as c:
+        data = c.get(path=['/'],datatype='config',encoding='json_ietf')
+        res = data['notification'][0]['update'][0]['val']
+
+        # Remove agent configs
+        for ns in list(res):
+           if not ns.startswith( "srl_nokia" ):
+             print( f"Removing: {ns}" )
+             del res[ns]
+
+        with open( node+".json", "w") as configfile:
+            configfile.write( json.dumps(res) )
+
 def CreateTopology(neighbors):
     from jinja2 import Template
-    nodes = set( [ (lldp[0][0],lldp[0][1]) for lldp in neighbors.values() ] )
-    TOPOLOGY = """name: Auto-discovered sandbox
+    nodes = set( [ (node,lldp[0][0],lldp[0][1]) for node,lldp in neighbors.items() ] )
+    TOPOLOGY = """name: Auto-discovered-sandbox
 topology:
   kinds:
     srl:
       image: ghcr.io/nokia/srlinux:latest # Overriden at node level
   nodes:
-  {% for n,v in nodes %}
+  {% for ip,n,v in nodes %}
     {{ n }}:
       kind: srl
       image: ghcr.io/nokia/srlinux:{{ v }}
-      startup-config: todo-download.json
+      startup-config: {{ ip }}.json
   {% endfor %}
   links:
   {% for n in neighbors -%}
@@ -84,6 +108,7 @@ if __name__ == "__main__":
     neighbors = {}
     for n in nodes:
         neighbors[n] = ListLLDPNeighbors(n)
+        GetConfig(n)
     print( neighbors )
 
     CreateTopology(neighbors)
