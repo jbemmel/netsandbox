@@ -1,0 +1,3 @@
+scapy
+jinja2
+pygnmi
