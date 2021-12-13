@@ -40,6 +40,7 @@ def GetConfigAndListLLDPNeighbors(node):
                      insecure=False, debug=False)
       c.connect()
     except Exception as ex:
+      # Try 'insecure' too
       c = gNMIclient(target=(node,GNMI_PORT),
                      username="admin",password="admin",
                      insecure=True, debug=False)
